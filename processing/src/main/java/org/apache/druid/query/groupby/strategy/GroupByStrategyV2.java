@@ -33,6 +33,7 @@ import org.apache.druid.guice.annotations.Global;
 import org.apache.druid.guice.annotations.Merging;
 import org.apache.druid.guice.annotations.Smile;
 import org.apache.druid.java.util.common.Intervals;
+import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.collect.Utils;
 import org.apache.druid.java.util.common.guava.CloseQuietly;
 import org.apache.druid.java.util.common.guava.LazySequence;
@@ -40,8 +41,8 @@ import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.Sequences;
 import org.apache.druid.query.DataSource;
 import org.apache.druid.query.DruidProcessingConfig;
-import org.apache.druid.query.InsufficientResourcesException;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryCapacityExceededException;
 import org.apache.druid.query.QueryContexts;
 import org.apache.druid.query.QueryDataSource;
 import org.apache.druid.query.QueryPlus;
@@ -133,7 +134,12 @@ public class GroupByStrategyV2 implements GroupByStrategy
         mergeBufferHolders = mergeBufferPool.takeBatch(requiredMergeBufferNum);
       }
       if (mergeBufferHolders.isEmpty()) {
-        throw new InsufficientResourcesException("Cannot acquire enough merge buffers");
+        throw QueryCapacityExceededException.withErrorMessageAndResolvedHost(
+            StringUtils.format(
+                "Cannot acquire %s merge buffers. Try again after current running queries are finished.",
+                requiredMergeBufferNum
+            )
+        );
       } else {
         return new GroupByQueryResource(mergeBufferHolders);
       }
@@ -408,27 +414,10 @@ public class GroupByStrategyV2 implements GroupByStrategy
         // Dimension spec including dimension name and output name
         final List<DimensionSpec> subTotalDimensionSpec = new ArrayList<>(dimsInSubtotalSpec.size());
         final List<DimensionSpec> dimensions = query.getDimensions();
-        final List<DimensionSpec> newDimensions = new ArrayList<>();
 
-        for (int i = 0; i < dimensions.size(); i++) {
-          DimensionSpec dimensionSpec = dimensions.get(i);
+        for (DimensionSpec dimensionSpec : dimensions) {
           if (dimsInSubtotalSpec.contains(dimensionSpec.getOutputName())) {
-            newDimensions.add(
-                new DefaultDimensionSpec(
-                    dimensionSpec.getOutputName(),
-                    dimensionSpec.getOutputName(),
-                    dimensionSpec.getOutputType()
-                )
-            );
             subTotalDimensionSpec.add(dimensionSpec);
-          } else {
-            // Insert dummy dimension so all subtotals queries have ResultRows with the same shape.
-            // Use a field name that does not appear in the main query result, to assure the result will be null.
-            String dimName = "_" + i;
-            while (query.getResultRowSignature().indexOf(dimName) >= 0) {
-              dimName = "_" + dimName;
-            }
-            newDimensions.add(DefaultDimensionSpec.of(dimName));
           }
         }
 
@@ -442,8 +431,7 @@ public class GroupByStrategyV2 implements GroupByStrategy
         }
 
         GroupByQuery subtotalQuery = baseSubtotalQuery
-            .withLimitSpec(subtotalQueryLimitSpec)
-            .withDimensionSpecs(newDimensions);
+            .withLimitSpec(subtotalQueryLimitSpec);
 
         final GroupByRowProcessor.ResultSupplier resultSupplierOneFinal = resultSupplierOne;
         if (Utils.isPrefix(subtotalSpec, queryDimNames)) {
